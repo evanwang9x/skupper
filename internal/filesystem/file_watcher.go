@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -38,6 +39,7 @@ type FileWatcher struct {
 	watcherLock sync.Mutex
 	logger      *slog.Logger
 	started     bool
+	resyncing   atomic.Bool
 	watcher     *fsnotify.Watcher
 	refresh     chan bool
 	triggerCh   chan eventTrigger
@@ -136,25 +138,39 @@ func (w *FileWatcher) processEvents(stopCh <-chan struct{}) {
 			// Drain and log watcher errors so the watcher does not get stuck.
 			if !ok {
 				// Errors channel closed: the watcher has been closed.
-				w.started = false
+				w.setStarted(false)
 				return
 			}
 			w.logger.Error("file watcher error", slog.String("error", err.Error()))
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
 				// Events were dropped; resync to recover the missed changes.
-				w.resync()
+				// Run it off the event loop so we keep servicing events, and
+				// coalesce overlapping overflows into a single resync.
+				if w.resyncing.CompareAndSwap(false, true) {
+					go func() {
+						defer w.resyncing.Store(false)
+						w.resync(stopCh)
+					}()
+				}
 			}
 		case <-stopCh:
 			_ = w.watcher.Close()
-			w.started = false
+			w.setStarted(false)
 			return
 		}
 	}
 }
 
+func (w *FileWatcher) setStarted(started bool) {
+	w.runningLock.Lock()
+	defer w.runningLock.Unlock()
+	w.started = started
+}
+
 // resync re-emits OnCreate for the files currently present under each watched
-// path, so handlers can recover after dropped events.
-func (w *FileWatcher) resync() {
+// path, so handlers can recover after dropped events. It returns early if
+// stopCh is closed so it cannot leak on shutdown.
+func (w *FileWatcher) resync(stopCh <-chan struct{}) {
 	w.handlerLock.RLock()
 	defer w.handlerLock.RUnlock()
 	for path, handlers := range w.handlerMap {
@@ -180,9 +196,13 @@ func (w *FileWatcher) resync() {
 		for _, handler := range handlers {
 			for _, existingPath := range existingFilesAndDirectories {
 				if handler.Filter(existingPath) {
-					w.triggerCh <- eventTrigger{
+					select {
+					case w.triggerCh <- eventTrigger{
 						operation: handler.OnCreate,
 						name:      existingPath,
+					}:
+					case <-stopCh:
+						return
 					}
 				}
 			}

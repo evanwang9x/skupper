@@ -36,14 +36,18 @@ func TestOverflowKillsWatcher(t *testing.T) {
 
 	const burst = 2000
 	for i := 0; i < burst; i++ {
-		os.WriteFile(filepath.Join(dir, fmt.Sprintf("b-%04d.yaml", i)), []byte("x"), 0644)
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("b-%04d.yaml", i)), []byte("x"), 0644); err != nil {
+			t.Fatalf("writing burst file %d: %v", i, err)
+		}
 	}
 	time.Sleep(10 * time.Second)
 	afterBurst := h.n.Load()
 	t.Logf("phase 1: OnCreate fired %d / %d", afterBurst, burst)
 
 	before := h.n.Load()
-	os.WriteFile(filepath.Join(dir, "canary.yaml"), []byte("x"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "canary.yaml"), []byte("x"), 0644); err != nil {
+		t.Fatalf("writing canary file: %v", err)
+	}
 	time.Sleep(8 * time.Second)
 	delta := h.n.Load() - before
 
