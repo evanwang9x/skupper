@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -131,10 +132,60 @@ func (w *FileWatcher) processEvents(stopCh <-chan struct{}) {
 				}
 				w.handlerLock.RUnlock()
 			}
+		case err, ok := <-w.watcher.Errors:
+			// Drain and log watcher errors so the watcher does not get stuck.
+			if !ok {
+				// Errors channel closed: the watcher has been closed.
+				w.started = false
+				return
+			}
+			w.logger.Error("file watcher error", slog.String("error", err.Error()))
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				// Events were dropped; resync to recover the missed changes.
+				w.resync()
+			}
 		case <-stopCh:
 			_ = w.watcher.Close()
 			w.started = false
 			return
+		}
+	}
+}
+
+// resync re-emits OnCreate for the files currently present under each watched
+// path, so handlers can recover after dropped events.
+func (w *FileWatcher) resync() {
+	w.handlerLock.RLock()
+	defer w.handlerLock.RUnlock()
+	for path, handlers := range w.handlerMap {
+		stat, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		var existingFilesAndDirectories []string
+		if stat.IsDir() {
+			pathEntries, err := os.ReadDir(path)
+			if err != nil {
+				w.logger.Error("error reading monitored path during resync",
+					slog.String("path", path),
+					slog.String("error", err.Error()))
+				continue
+			}
+			for _, entry := range pathEntries {
+				existingFilesAndDirectories = append(existingFilesAndDirectories, filepath.Join(path, entry.Name()))
+			}
+		} else {
+			existingFilesAndDirectories = append(existingFilesAndDirectories, path)
+		}
+		for _, handler := range handlers {
+			for _, existingPath := range existingFilesAndDirectories {
+				if handler.Filter(existingPath) {
+					w.triggerCh <- eventTrigger{
+						operation: handler.OnCreate,
+						name:      existingPath,
+					}
+				}
+			}
 		}
 	}
 }
