@@ -4,18 +4,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
-type ovHandler struct{ n atomic.Int32 }
+type ovHandler struct {
+	w              *fsnotify.Watcher
+	reTriggerCount int
+	n              atomic.Int32
+}
 
 func (h *ovHandler) OnBasePathAdded(string) {}
-func (h *ovHandler) OnCreate(string)        { h.n.Add(1); time.Sleep(120 * time.Millisecond) }
-func (h *ovHandler) OnUpdate(string)        {}
-func (h *ovHandler) OnRemove(string)        {}
-func (h *ovHandler) Filter(s string) bool   { return filepath.Ext(s) == ".yaml" }
+func (h *ovHandler) OnCreate(name string) {
+	if strings.Contains(name, "b-0010.") {
+		h.reTriggerCount++
+		if h.reTriggerCount == 1 {
+			// force an overflow error
+			h.w.Errors <- fsnotify.ErrEventOverflow
+		}
+	}
+	h.n.Add(1)
+	time.Sleep(120 * time.Millisecond)
+}
+func (h *ovHandler) OnUpdate(string)      {}
+func (h *ovHandler) OnRemove(string)      {}
+func (h *ovHandler) Filter(s string) bool { return filepath.Ext(s) == ".yaml" }
 
 // The test floods a watched directory with 2000 files while using a deliberately slow handler,
 // which overflows the kernel's inotify queue and triggers an fsnotify error that nothing consumes.
@@ -27,7 +44,9 @@ func TestOverflowKillsWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &ovHandler{}
+	h := &ovHandler{
+		w: w.watcher,
+	}
 	w.Add(dir, h)
 	stop := make(chan struct{})
 	w.Start(stop)
@@ -55,5 +74,9 @@ func TestOverflowKillsWatcher(t *testing.T) {
 	if delta == 0 {
 		t.Errorf("WATCHER IS DEAD: canary create was never reported (phase1 delivered %d/%d)",
 			afterBurst, burst)
+	}
+
+	if h.reTriggerCount != 2 {
+		t.Error("WATCHER IS DEAD: expected 2 events on file b-0010.yaml, got:", h.reTriggerCount)
 	}
 }
