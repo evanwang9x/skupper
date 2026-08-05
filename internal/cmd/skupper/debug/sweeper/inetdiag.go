@@ -25,11 +25,13 @@ NLMSG_DONE = 3
 NLMSG_ERROR = 2
 INET_DIAG_INFO = 2
 
+TCP_STATES = (1 << 1) | (1 << 4) | (1 << 5) | (1 << 8) | (1 << 9) | (1 << 11)
+
 s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_SOCK_DIAG)
 # inet_diag_req_v2: family, protocol, ext (request tcp_info), pad,
-# states bitmask (established only), zeroed socket id
+# states bitmask, zeroed socket id
 req = struct.pack("=BBBBI48s", socket.AF_INET, socket.IPPROTO_TCP,
-                  1 << (INET_DIAG_INFO - 1), 0, 1 << 1, b"")
+                  1 << (INET_DIAG_INFO - 1), 0, TCP_STATES, b"")
 s.send(struct.pack("=IHHII", 16 + len(req), SOCK_DIAG_BY_FAMILY,
                    NLM_F_REQUEST_DUMP, 1, 0) + req)
 
