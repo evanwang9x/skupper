@@ -24,10 +24,9 @@ type connInfo struct {
 	// LocalSocket is the router's own "host:port" for this connection's
 	// socket. Unlike Host, it is unique per connection even for 'out'
 	// connections, which all share the backend's address as their Host.
-	LocalSocket    string `json:"localSocket"`
-	Dir            string `json:"dir"`
-	UptimeSeconds  *int   `json:"uptimeSeconds"`
-	LastDlvSeconds *int   `json:"lastDlvSeconds"`
+	LocalSocket   string `json:"localSocket"`
+	Dir           string `json:"dir"`
+	UptimeSeconds *int   `json:"uptimeSeconds"`
 }
 
 // socketInfo is the kernel's view of a TCP socket, as reported by `ss -tin`.
@@ -65,21 +64,9 @@ func LocalExec(argv []string) ([]byte, error) {
 // extraArgs are appended to the skmanage invocation (e.g. --ssl-certificate
 // options when the management endpoint is amqps).
 func Gather(execFn Execer, skmanageBin, url string, extraArgs ...string) (Snapshot, error) {
-	raw, err := runSkmanage(execFn, skmanageBin, url, extraArgs, "QUERY", "--type="+ConnType)
+	tcpConns, err := gatherConns(execFn, skmanageBin, url, extraArgs...)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("could not query router at %s: %w", url, err)
-	}
-
-	var allConns []connInfo
-	if err := json.Unmarshal(raw, &allConns); err != nil {
-		return Snapshot{}, fmt.Errorf("failed to parse connection list: %w", err)
-	}
-
-	var tcpConns []connInfo
-	for _, c := range allConns {
-		if isTCPAdaptorConn(c) {
-			tcpConns = append(tcpConns, c)
-		}
+		return Snapshot{}, err
 	}
 
 	byPeer, byLocal, err := gatherSockets(execFn)
@@ -92,6 +79,28 @@ func Gather(execFn Execer, skmanageBin, url string, extraArgs ...string) (Snapsh
 		Sockets:        byPeer,
 		SocketsByLocal: byLocal,
 	}, nil
+}
+
+// gatherConns queries the router for its connections, keeping only the TCP
+// adaptor ones.
+func gatherConns(execFn Execer, skmanageBin, url string, extraArgs ...string) ([]connInfo, error) {
+	raw, err := runSkmanage(execFn, skmanageBin, url, extraArgs, "QUERY", "--type="+ConnType)
+	if err != nil {
+		return nil, fmt.Errorf("could not query router at %s: %w", url, err)
+	}
+
+	var allConns []connInfo
+	if err := json.Unmarshal(raw, &allConns); err != nil {
+		return nil, fmt.Errorf("failed to parse connection list: %w", err)
+	}
+
+	var tcpConns []connInfo
+	for _, c := range allConns {
+		if isTCPAdaptorConn(c) {
+			tcpConns = append(tcpConns, c)
+		}
+	}
+	return tcpConns, nil
 }
 
 func isTCPAdaptorConn(c connInfo) bool {

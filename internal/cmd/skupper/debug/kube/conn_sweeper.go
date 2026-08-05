@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/skupperproject/skupper/internal/cmd/skupper/common"
@@ -79,6 +80,15 @@ func (cmd *CmdConnSweeper) NewClient(cobraCommand *cobra.Command, args []string)
 
 func (cmd *CmdConnSweeper) ValidateInput(args []string) error {
 	var validationErrors []error
+	if err := sweeper.ValidatePorts(cmd.Flags.Ports); err != nil {
+		validationErrors = append(validationErrors, err)
+	}
+	if cmd.Flags.ListPorts {
+		if cmd.Flags.Execute {
+			validationErrors = append(validationErrors, fmt.Errorf("--execute cannot be used with --list-ports: listing ports never closes connections"))
+		}
+		return errors.Join(validationErrors...)
+	}
 	numberValidator := validator.NewNumberValidator()
 	numberValidator.IncludeZero = false
 	if ok, err := numberValidator.Evaluate(cmd.Flags.IdleThreshold); !ok {
@@ -105,6 +115,10 @@ func (cmd *CmdConnSweeper) Run() error {
 		return err
 	}
 
+	if cmd.Flags.ListPorts {
+		return cmd.listPorts(podNames)
+	}
+
 	// Each ready replica has its own connections, so sweep every pod.
 	var total sweeper.Result
 	var failedPods []string
@@ -115,6 +129,7 @@ func (cmd *CmdConnSweeper) Run() error {
 			Skmanage:          sweeper.DefaultSkmanage,
 			IdleThresholdSecs: cmd.Flags.IdleThreshold,
 			Execute:           cmd.Flags.Execute,
+			Ports:             cmd.Flags.Ports,
 			Exec:              cmd.podExecer(podName),
 		})
 		if err != nil {
@@ -142,6 +157,39 @@ func (cmd *CmdConnSweeper) Run() error {
 }
 
 func (cmd *CmdConnSweeper) WaitUntil() error { return nil }
+
+// listPorts prints a port table per router pod, then a merged table once more
+// than one pod reported.
+func (cmd *CmdConnSweeper) listPorts(podNames []string) error {
+	var perPod [][]sweeper.PortStat
+	var failedPods []string
+	for _, podName := range podNames {
+		fmt.Printf("=== router pod %s (namespace %s) ===\n", podName, cmd.Namespace)
+		stats, err := sweeper.ListPorts(sweeper.Config{
+			URL:      sweeper.DefaultURL,
+			Skmanage: sweeper.DefaultSkmanage,
+			Ports:    cmd.Flags.Ports,
+			Exec:     cmd.podExecer(podName),
+		})
+		if err != nil {
+			fmt.Printf("could not list ports for pod %s: %v\n\n", podName, err)
+			failedPods = append(failedPods, podName)
+			continue
+		}
+		sweeper.PrintPortStats(os.Stdout, stats, cmd.Flags.Ports)
+		fmt.Println()
+		perPod = append(perPod, stats)
+	}
+
+	if len(perPod) > 1 {
+		fmt.Println("=== all pods ===")
+		sweeper.PrintPortStats(os.Stdout, sweeper.MergePortStats(perPod...), cmd.Flags.Ports)
+	}
+	if len(failedPods) > 0 {
+		return fmt.Errorf("could not list ports on %d of %d router pod(s): %v", len(failedPods), len(podNames), failedPods)
+	}
+	return nil
+}
 
 func (cmd *CmdConnSweeper) findRouterPods() ([]string, error) {
 	pods, err := cmd.KubeClient.CoreV1().Pods(cmd.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: routerPodSelector})

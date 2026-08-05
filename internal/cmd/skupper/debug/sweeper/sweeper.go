@@ -18,6 +18,9 @@ type Config struct {
 	Skmanage          string
 	IdleThresholdSecs int
 	Execute           bool
+	// Ports limits the sweep to connections on these router-side ports. Empty
+	// means every port.
+	Ports []int
 	// Exec runs skmanage and the socket query.
 	Exec Execer
 	// SkmanageExtraArgs is appended to every skmanage invocation — e.g.
@@ -44,9 +47,22 @@ func Run(cfg Config) (Result, error) {
 	if cfg.Exec == nil {
 		cfg.Exec = LocalExec
 	}
+	if err := ValidatePorts(cfg.Ports); err != nil {
+		return Result{}, err
+	}
 	snap, err := Gather(cfg.Exec, cfg.Skmanage, cfg.URL, cfg.SkmanageExtraArgs...)
 	if err != nil {
 		return Result{}, err
+	}
+
+	if len(cfg.Ports) > 0 {
+		matched := FilterByPorts(snap.TCPConns, cfg.Ports)
+		if len(matched) == 0 {
+			logf("No connections found on port %s (%d TCP adaptor connection(s) on other ports).",
+				FormatPorts(cfg.Ports), len(snap.TCPConns))
+			return Result{}, nil
+		}
+		snap.TCPConns = matched
 	}
 
 	toKill := Evaluate(snap, time.Duration(cfg.IdleThresholdSecs)*time.Second)

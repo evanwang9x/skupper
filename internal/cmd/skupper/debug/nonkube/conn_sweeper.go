@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -44,6 +45,15 @@ func (cmd *CmdConnSweeper) NewClient(cobraCommand *cobra.Command, args []string)
 
 func (cmd *CmdConnSweeper) ValidateInput(args []string) error {
 	var validationErrors []error
+	if err := sweeper.ValidatePorts(cmd.Flags.Ports); err != nil {
+		validationErrors = append(validationErrors, err)
+	}
+	if cmd.Flags.ListPorts {
+		if cmd.Flags.Execute {
+			validationErrors = append(validationErrors, fmt.Errorf("--execute cannot be used with --list-ports: listing ports never closes connections"))
+		}
+		return errors.Join(validationErrors...)
+	}
 	numberValidator := validator.NewNumberValidator()
 	numberValidator.IncludeZero = false
 	if ok, err := numberValidator.Evaluate(cmd.Flags.IdleThreshold); !ok {
@@ -97,11 +107,27 @@ func (cmd *CmdConnSweeper) Run() error {
 	if cmd.exec != nil {
 		fmt.Printf("running against %s container %s-skupper-router\n", cmd.platform, cmd.namespace)
 	}
+	if cmd.Flags.ListPorts {
+		stats, err := sweeper.ListPorts(sweeper.Config{
+			URL:               cmd.url,
+			Skmanage:          cmd.skmanage,
+			Ports:             cmd.Flags.Ports,
+			Exec:              cmd.exec,
+			SkmanageExtraArgs: cmd.sslArgs,
+		})
+		if err != nil {
+			return err
+		}
+		sweeper.PrintPortStats(os.Stdout, stats, cmd.Flags.Ports)
+		return nil
+	}
+
 	res, err := sweeper.Run(sweeper.Config{
 		URL:               cmd.url,
 		Skmanage:          cmd.skmanage,
 		IdleThresholdSecs: cmd.Flags.IdleThreshold,
 		Execute:           cmd.Flags.Execute,
+		Ports:             cmd.Flags.Ports,
 		Exec:              cmd.exec,
 		SkmanageExtraArgs: cmd.sslArgs,
 	})
