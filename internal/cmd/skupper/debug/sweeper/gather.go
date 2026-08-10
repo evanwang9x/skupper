@@ -2,6 +2,7 @@ package sweeper
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -109,20 +110,45 @@ func isTCPAdaptorConn(c connInfo) bool {
 
 // gatherSockets reads kernel socket state, preferring `ss -tin` and falling
 // back to the python netlink script when ss isn't available (e.g. inside the
-// router container, which ships python3 but not iproute).
+// router container, which ships python3 but not iproute) or when ss runs but
+// cannot report idle timers.
 func gatherSockets(execFn Execer) (map[string]socketInfo, map[string]socketInfo, error) {
 	out, ssErr := execFn([]string{"ss", "-tin"})
 	if ssErr == nil {
 		byPeer, byLocal := socketsFromSS(out)
-		return byPeer, byLocal, nil
+		// `ss` exits 0 even when it cannot open a netlink socket: it warns on
+		// stderr and falls back to /proc/net/tcp, which lists the sockets but
+		// carries no TCP_INFO, so no row has the indented detail line the
+		// timers come from. Sockets listed but none parsed means the timers
+		// are missing, not that the host is idle, so try the fallback rather
+		// than report every connection as unmatchable.
+		if len(byPeer) > 0 || !ssListedSockets(out) {
+			return byPeer, byLocal, nil
+		}
+		ssErr = errors.New("ss listed sockets but reported no TCP_INFO")
 	}
 
 	out, pyErr := execFn([]string{"python3", "-c", inetDiagScript})
 	if pyErr != nil {
-		return nil, nil, fmt.Errorf("could not read socket state, so no connection could be matched to its socket: ss unavailable (%v) and python3 fallback failed (%v)", ssErr, pyErr)
+		return nil, nil, fmt.Errorf("could not read socket state, so no connection could be matched to its socket: ss unusable (%v) and python3 fallback failed (%v)", ssErr, pyErr)
 	}
 	byPeer, byLocal := socketsFromDiagOutput(out)
 	return byPeer, byLocal, nil
+}
+
+// ssListedSockets reports whether out holds at least one socket row, so that
+// output carrying no sockets at all can be told apart from output whose rows
+// are all missing their detail lines.
+func ssListedSockets(out []byte) bool {
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if _, _, ok := ssSocketRow(line); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // socketsFromSS builds two {lastrcv, lastsnd} maps — one keyed by peer
@@ -139,11 +165,11 @@ func socketsFromSS(out []byte) (byPeer, byLocal map[string]socketInfo) {
 		}
 		if line[0] != ' ' && line[0] != '\t' {
 			pendingLocal, pendingPeer = "", ""
-			fields := strings.Fields(line)
-			if len(fields) < 5 || fields[0] == "State" {
+			local, peer, ok := ssSocketRow(line)
+			if !ok {
 				continue
 			}
-			pendingLocal, pendingPeer = fields[3], fields[4]
+			pendingLocal, pendingPeer = local, peer
 			continue
 		}
 		if pendingPeer == "" {
@@ -158,6 +184,16 @@ func socketsFromSS(out []byte) (byPeer, byLocal map[string]socketInfo) {
 		pendingLocal, pendingPeer = "", ""
 	}
 	return byPeer, byLocal
+}
+
+// ssSocketRow pulls the local and peer addresses out of an `ss` socket row,
+// reporting ok=false for the column header and any line too short to be one.
+func ssSocketRow(line string) (local, peer string, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 5 || fields[0] == "State" {
+		return "", "", false
+	}
+	return fields[3], fields[4], true
 }
 
 // extractMsField returns the integer following "key:" in line (e.g. key
