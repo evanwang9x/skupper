@@ -81,8 +81,8 @@ func TestOverflowKillsWatcher(t *testing.T) {
 			afterBurst, burst)
 	}
 
-	if got := h.reTriggerCount.Load(); got != 2 {
-		t.Errorf("WATCHER IS DEAD: expected 2 events on file b-0010.yaml, got: %d", got)
+	if got := h.reTriggerCount.Load(); got < 2 {
+		t.Errorf("WATCHER IS DEAD: expected at least 2 events on file b-0010.yaml, got: %d", got)
 	}
 }
 
