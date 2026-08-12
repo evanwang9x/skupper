@@ -41,6 +41,7 @@ type FileWatcher struct {
 	started     bool
 	resyncing   atomic.Bool
 	watcher     *fsnotify.Watcher
+	errCh       chan error
 	refresh     chan bool
 	triggerCh   chan eventTrigger
 	handlerMap  map[string][]FSChangeHandler
@@ -56,7 +57,11 @@ func NewWatcher(attrs ...slog.Attr) (*FileWatcher, error) {
 		logger = logger.With(slog.Any(attr.Key, attr.Value))
 	}
 	return &FileWatcher{
-		watcher:    watcher,
+		watcher: watcher,
+		// The watcher's own error channel. Kept as a field so tests can
+		// substitute a channel they control, since fsnotify closes this one
+		// from a goroutine that shutdown does not synchronize with.
+		errCh:      watcher.Errors,
 		logger:     logger,
 		refresh:    make(chan bool),
 		triggerCh:  make(chan eventTrigger),
@@ -134,7 +139,7 @@ func (w *FileWatcher) processEvents(stopCh <-chan struct{}) {
 				}
 				w.handlerLock.RUnlock()
 			}
-		case err, ok := <-w.watcher.Errors:
+		case err, ok := <-w.errCh:
 			// Drain and log watcher errors so the watcher does not get stuck.
 			if !ok {
 				// Errors channel closed: the watcher has been closed.
